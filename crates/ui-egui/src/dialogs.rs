@@ -174,6 +174,26 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
         let mut outcome: Option<bool> = None; // Some(true)=OK, Some(false)=Cancel
         let mut apply_requested = false;
         let title = display_title(&d);
+        // ID Photo is a window of its own, like Camera Raw, not a modal card.
+        if d.kind == DialogKind::Command && crate::idphoto_ui::owns(&d.fields) {
+            let mut fields = d.fields.clone();
+            let outcome = crate::idphoto_ui::window(app, ctx, d.id, &title, &mut fields);
+            if let Some(dm) = app.ui.dialog_mut(d.id) {
+                dm.fields = fields;
+            }
+            match outcome {
+                Some(true) => {
+                    if let Err(error) = confirm(app, d.id) {
+                        app.ui.status = error;
+                    }
+                }
+                Some(false) => {
+                    let _ = cancel(app, d.id);
+                }
+                None => {}
+            }
+            continue;
+        }
         let id = egui::Id::new(("dialog", d.id));
         // Opens where the same dialog was last left (centred the first time), then its top-left
         // stays put (offset from the window's top-left, moved by dragging the title bar; view
@@ -608,6 +628,7 @@ pub fn confirm(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
         DialogKind::Command if crate::guide_layout_ui::owns(&d.fields) => crate::guide_layout_ui::confirm(app, &d.fields),
         DialogKind::Command if crate::brush_preset_dialog::owns(&d.fields) => crate::brush_preset_dialog::confirm(app, &d.fields),
         DialogKind::Command if crate::fill_ui::owns(&d.fields) => crate::fill_ui::confirm(app, &d.fields),
+        DialogKind::Command if crate::idphoto_ui::owns(&d.fields) => crate::idphoto_ui::confirm(app, &d.fields),
         DialogKind::Command if crate::pattern_fill_ui::owns(&d.fields) => crate::pattern_fill_ui::confirm(app, &d.fields),
         DialogKind::Command if crate::stroke_ui::owns(&d.fields) => crate::stroke_ui::confirm(app, &d.fields),
         DialogKind::Command if crate::channel_options_ui::owns(&d.fields) => crate::channel_options_ui::confirm(app, &d.fields),

@@ -244,7 +244,7 @@ pub(crate) fn check_resample_budget(cmd: &str, doc: &Document, nw: u32, nh: u32,
 /// Resamples the whole document (pixels, masks, channels, selection, effects, vectors, guides) to
 /// `nw` x `nh` px with `filter`: the body of Image Size, shared by the Crop tool's W x H x Resolution
 /// mode. Callers check [`check_resample_budget`] first.
-fn resample_doc(doc: &mut Document, nw: u32, nh: u32, filter: Resample) {
+pub(crate) fn resample_doc(doc: &mut Document, nw: u32, nh: u32, filter: Resample) {
     let (ow, oh) = (doc.size.width, doc.size.height);
     let (sx, sy) = (nw as f64 / ow.max(1) as f64, nh as f64 / oh.max(1) as f64);
     if (sx - 1.0).abs() < 1e-12 && (sy - 1.0).abs() < 1e-12 {
@@ -309,7 +309,7 @@ pub(crate) fn translate_doc(doc: &mut Document, cmd: &str, dx: i32, dy: i32) -> 
 /// Crops the document to `r` (in current document coordinates).
 /// A frame that extends past the canvas fills the Background's new area with `extension` (the
 /// background colour, as Photoshop's Crop tool does); other layers get transparent pixels there.
-fn crop_doc(doc: &mut Document, cmd: &str, r: Rect, delete_pixels: bool, extension: [f32; 4]) -> Result<()> {
+pub(crate) fn crop_doc(doc: &mut Document, cmd: &str, r: Rect, delete_pixels: bool, extension: [f32; 4]) -> Result<()> {
     // The origin moves to (0, 0); `-i32::MIN` has no i32 value (#959).
     let (Some(dx), Some(dy)) = (r.x0.checked_neg(), r.y0.checked_neg()) else {
         return Err(bad(cmd, format!("the crop origin ({}, {}) can't be moved to (0, 0) within the 32-bit coordinate range", r.x0, r.y0)));

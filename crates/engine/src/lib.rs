@@ -57,6 +57,8 @@ pub mod guide_layout;
 pub mod hidden_target;
 pub mod history_cmds;
 pub mod history_select_cmds;
+pub mod idphoto_cmds;
+pub mod idphoto_layout;
 pub mod image_cmds;
 pub mod inspect;
 pub mod installed_profiles;

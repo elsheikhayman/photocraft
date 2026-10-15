@@ -257,6 +257,7 @@ fn drop_line(f: &mut Map<String, Value>, line: u8, at: f64, canvas: (f64, f64)) 
 /// The live preview of the finished photo, with its guides, centred in `area`. The head top, eye,
 /// chin and middle lines are dragged onto the face in the picture; on drop the photo is re-fitted.
 fn preview_pane(app: &PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Value>, area: Rect) {
+    position_keys(ui.ctx(), f);
     let t = Tokens::get(ui.ctx());
     let (width_mm, height_mm) = (num(f, "widthMm", 35.0), num(f, "heightMm", 45.0));
     let p = ui.painter().with_clip_rect(area);
@@ -328,6 +329,48 @@ fn preview_pane(app: &PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
         }
         Err(e) => {
             p.text(area.center(), Align2::CENTER_CENTER, e, egui::FontId::proportional(13.0), t.danger);
+        }
+    }
+}
+
+/// Move the photo inside its output frame by one output pixel (ten with Shift). The horizontal
+/// offset already represents the image's horizontal placement; changing the eye's output position
+/// shifts the crop vertically while keeping the face rectangle itself unchanged.
+fn nudge_position(f: &mut Map<String, Value>, dx: f64, dy: f64, multiplier: f64) {
+    let width_px = (num(f, "widthMm", 35.0) * num(f, "dpi", 300.0) / 25.4).round().max(1.0);
+    let height_px = (num(f, "heightMm", 45.0) * num(f, "dpi", 300.0) / 25.4).round().max(1.0);
+    let h_step = 100.0 * multiplier / width_px;
+    let v_step = 100.0 * multiplier / height_px;
+    if dx != 0.0 {
+        let h_offset = (num(f, "hOffsetPct", 0.0) + dx * h_step).clamp(f64::from(H_RANGE.0), f64::from(H_RANGE.1));
+        f.insert("hOffsetPct".into(), json!(h_offset));
+    }
+    if dy != 0.0 {
+        // A larger eye-from-bottom value moves the image up in the output frame.
+        let eye_from_bottom = (num(f, "eyeFromBottomPct", 56.0) - dy * v_step).clamp(f64::from(EYE_RANGE.0), f64::from(EYE_RANGE.1));
+        f.insert("eyeFromBottomPct".into(), json!(eye_from_bottom));
+    }
+}
+
+/// Arrow-key positioning belongs to this window, not the main canvas' Move tool. Leave arrows to
+/// text fields, focused widgets and popups; Alt/Cmd/Ctrl arrows retain their usual meanings.
+fn position_keys(ctx: &egui::Context, f: &mut Map<String, Value>) {
+    if egui::Popup::is_any_open(ctx) || crate::shortcut_dispatch::Focus::of(ctx) != crate::shortcut_dispatch::Focus::None {
+        return;
+    }
+    let modifiers = ctx.input(|i| i.modifiers);
+    if modifiers.alt || modifiers.command || modifiers.ctrl {
+        return;
+    }
+    let keys = [(egui::Key::ArrowLeft, -1.0, 0.0), (egui::Key::ArrowRight, 1.0, 0.0), (egui::Key::ArrowUp, 0.0, -1.0), (egui::Key::ArrowDown, 0.0, 1.0)];
+    for (key, dx, dy) in keys {
+        for (shift, step) in [(true, 10.0), (false, 1.0)] {
+            let mods = if shift { egui::Modifiers::SHIFT } else { egui::Modifiers::NONE };
+            if ctx.input_mut(|i| i.consume_key(mods, key)) {
+                nudge_position(f, dx, dy, step);
+                ctx.request_repaint();
+                return;
+            }
         }
     }
 }
@@ -493,4 +536,81 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context, id: u64, title: &str
         });
     });
     outcome
+}
+
+#[cfg(test)]
+mod position_key_tests {
+    use super::*;
+
+    fn fields() -> Map<String, Value> {
+        let mut f = Map::new();
+        f.insert("widthMm".into(), json!(35.0));
+        f.insert("heightMm".into(), json!(45.0));
+        f.insert("dpi".into(), json!(300.0));
+        f.insert("hOffsetPct".into(), json!(0.0));
+        f.insert("eyeFromBottomPct".into(), json!(56.0));
+        f
+    }
+
+    fn press(ctx: &egui::Context, f: &mut Map<String, Value>, key: egui::Key, modifiers: egui::Modifiers) {
+        let input = egui::RawInput {
+            modifiers,
+            events: vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }],
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| position_keys(ui.ctx(), f)).textures_delta.clear();
+    }
+
+    #[test]
+    fn arrow_directions_move_the_photo_by_one_output_pixel() {
+        let mut f = fields();
+        nudge_position(&mut f, 1.0, 0.0, 1.0);
+        let horizontal_step = 100.0 / (35.0_f64 * 300.0 / 25.4).round();
+        assert!((num(&f, "hOffsetPct", 0.0) - horizontal_step).abs() < 1e-9, "Right moves the photo right");
+        nudge_position(&mut f, 0.0, -1.0, 1.0);
+        let vertical_step = 100.0 / (45.0_f64 * 300.0 / 25.4).round();
+        assert!((num(&f, "eyeFromBottomPct", 0.0) - (56.0 + vertical_step)).abs() < 1e-9, "Up moves the photo up");
+        nudge_position(&mut f, -1.0, 0.0, 1.0);
+        nudge_position(&mut f, 0.0, 1.0, 1.0);
+        assert!(num(&f, "hOffsetPct", 0.0).abs() < 1e-9);
+        assert!((num(&f, "eyeFromBottomPct", 0.0) - 56.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn shift_nudges_ten_output_pixels_and_position_stays_in_slider_ranges() {
+        let mut f = fields();
+        nudge_position(&mut f, -1.0, 1.0, 10.0);
+        let horizontal_step = 1000.0 / (35.0_f64 * 300.0 / 25.4).round();
+        let vertical_step = 1000.0 / (45.0_f64 * 300.0 / 25.4).round();
+        assert!((num(&f, "hOffsetPct", 0.0) + horizontal_step).abs() < 1e-9);
+        assert!((num(&f, "eyeFromBottomPct", 0.0) - (56.0 - vertical_step)).abs() < 1e-9);
+
+        f.insert("hOffsetPct".into(), json!(24.99));
+        f.insert("eyeFromBottomPct".into(), json!(69.99));
+        nudge_position(&mut f, 1.0, -1.0, 10.0);
+        assert_eq!(num(&f, "hOffsetPct", 0.0), f64::from(H_RANGE.1));
+        assert_eq!(num(&f, "eyeFromBottomPct", 0.0), f64::from(EYE_RANGE.1));
+    }
+
+    #[test]
+    fn arrow_events_update_the_preview_position_fields() {
+        let ctx = egui::Context::default();
+        let mut f = fields();
+        press(&ctx, &mut f, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+        press(&ctx, &mut f, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert!(num(&f, "hOffsetPct", 0.0) < 0.0);
+        assert!(num(&f, "eyeFromBottomPct", 0.0) < 56.0);
+
+        let before = num(&f, "hOffsetPct", 0.0);
+        press(&ctx, &mut f, egui::Key::ArrowRight, egui::Modifiers::SHIFT);
+        assert!(num(&f, "hOffsetPct", 0.0) > before);
+    }
+
+    #[test]
+    fn modified_arrows_are_not_stolen() {
+        let ctx = egui::Context::default();
+        let mut f = fields();
+        press(&ctx, &mut f, egui::Key::ArrowRight, egui::Modifiers::ALT);
+        assert_eq!(num(&f, "hOffsetPct", 0.0), 0.0);
+    }
 }

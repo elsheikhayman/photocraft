@@ -59,6 +59,7 @@ pub mod history_cmds;
 pub mod history_select_cmds;
 pub mod idphoto_cmds;
 pub mod idphoto_layout;
+pub mod selphy_cmds;
 pub mod image_cmds;
 pub mod inspect;
 pub mod installed_profiles;

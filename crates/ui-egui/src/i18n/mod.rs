@@ -999,6 +999,7 @@ mod tests {
         }
         strings.remove("---");
         strings.remove("ID Photo…"); // studio fork: English only
+        strings.remove("Print Sheet…");
         for l in LANGUAGES.iter().filter(|l| l.complete_menus) {
             let cat = l.catalog();
             let missing: Vec<_> = strings.iter().filter(|s| cat.plain(s).is_none()).collect();

@@ -478,6 +478,20 @@ fn settings_pane(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String,
 /// Camera Raw, the preview filling the left and the settings in a dock on the right. Returns
 /// `Some(true)` for OK and `Some(false)` for Cancel.
 pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context, id: u64, title: &str, f: &mut Map<String, Value>) -> Option<bool> {
+    shell(app, ctx, id, title, f, preview_pane, settings_pane)
+}
+
+/// The window frame the ID Photo and Selphy Sheet dialogs share: `view` paints the preview, `dock`
+/// the settings.
+pub fn shell(
+    app: &mut PhotocraftApp,
+    ctx: &egui::Context,
+    id: u64,
+    title: &str,
+    f: &mut Map<String, Value>,
+    view_pane: fn(&PhotocraftApp, &mut egui::Ui, &mut Map<String, Value>, Rect),
+    dock_pane: fn(&mut PhotocraftApp, &mut egui::Ui, &mut Map<String, Value>),
+) -> Option<bool> {
     // Modal, as Camera Raw is: the main window is dimmed and takes no input.
     let main = ctx.content_rect();
     egui::Area::new(egui::Id::new("idphoto-modal")).order(egui::Order::Foreground).fixed_pos(main.min).show(ctx, |ui| {
@@ -506,13 +520,13 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context, id: u64, title: &str
             let body = Rect::from_min_max(full.min, pos2(full.right(), full.bottom() - footer_h));
             let dock = Rect::from_min_max(pos2((body.right() - PANEL_W).max(body.left() + 1.0), body.top()), body.max);
             let view = Rect::from_min_max(body.min, pos2(dock.left(), body.bottom()));
-            let before = params(f);
-            preview_pane(app, ui, f, view);
+            let before = Value::Object(f.clone());
+            view_pane(app, ui, f, view);
             ui.painter().rect_filled(dock, 0.0, t.dock);
             ui.painter().line_segment([dock.left_top(), dock.left_bottom()], Stroke::new(1.0, t.separator));
             let mut props = ui.new_child(egui::UiBuilder::new().max_rect(dock.shrink2(vec2(14.0, 10.0))));
             props.spacing_mut().item_spacing.y = 6.0;
-            egui::ScrollArea::vertical().id_salt("idphoto-props").show(&mut props, |ui| settings_pane(app, ui, f));
+            egui::ScrollArea::vertical().id_salt("idphoto-props").show(&mut props, |ui| dock_pane(app, ui, f));
             let bar = Rect::from_min_max(pos2(full.left(), body.bottom()), full.max);
             ui.painter().line_segment([bar.left_top(), bar.right_top()], Stroke::new(1.0, t.separator));
             let mut footer = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(16.0, 10.0))).layout(egui::Layout::right_to_left(egui::Align::Min)));
@@ -530,7 +544,7 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context, id: u64, title: &str
                     outcome = Some(true);
                 }
             }
-            if before != params(f) {
+            if before != Value::Object(f.clone()) {
                 ctx.request_repaint();
             }
         });

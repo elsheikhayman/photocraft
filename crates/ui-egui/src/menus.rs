@@ -517,6 +517,12 @@ pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id:
             }
             Ok(json!({"dialog": crate::idphoto_ui::open(app)}))
         }
+        crate::selphy_ui::COMMAND if params.as_object().is_none_or(|o| o.is_empty()) => {
+            if let Some(Err(why)) = photocraft_engine::commands::find(id).map(|c| (c.enabled)(&app.session)) {
+                return Err(why);
+            }
+            Ok(json!({"dialog": crate::selphy_ui::open(app)}))
+        }
         // Channels › Channel Options… without params: the dialog on the targeted alpha/spot
         // channel, or Quick Mask Options while in Quick Mask (with params: the engine directly).
         crate::channel_options_ui::COMMAND if params.as_object().is_none_or(|o| o.is_empty()) => {

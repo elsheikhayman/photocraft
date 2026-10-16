@@ -15,13 +15,30 @@ use crate::widgets;
 pub const COMMAND: &str = "image.selphySheet.make";
 const MARK: &str = "__selphy";
 const TEMPLATES: &str = "image.selphySheet.make.templates";
-/// The settings a dialog keeps, a template saves and the next dialog starts from. The `trim*` ones
-/// are what the printer cuts off in borderless mode (drawn on the preview only).
-const KEYS: [&str; 11] = ["paperWidthMm", "paperHeightMm", "dpi", "copies", "gapMm", "scalePct", "leftMm", "topMm", "trimLeftMm", "trimRightMm", "trimTopMm"];
+/// Layout settings a built-in paper preset supplies.
+const LAYOUT_KEYS: [&str; 11] =
+    ["paperWidthMm", "paperHeightMm", "dpi", "copies", "gapMm", "scalePct", "leftMm", "topMm", "trimLeftMm", "trimRightMm", "trimTopMm"];
+/// Every setting a user template saves, including print-job options and printer trims.
+const TEMPLATE_KEYS: [&str; 14] = [
+    "paperWidthMm",
+    "paperHeightMm",
+    "dpi",
+    "copies",
+    "gapMm",
+    "scalePct",
+    "leftMm",
+    "topMm",
+    "trimLeftMm",
+    "trimRightMm",
+    "trimTopMm",
+    "cutMarks",
+    "rotate",
+    "copiesAuto",
+];
 const PREVIEW_PX: f64 = 900.0;
-/// Paper presets: id, label, then the [`KEYS`] values.
-const PRESETS: [(&str, &str, [f64; 11]); 1] =
-    [("selphy", "Canon Selphy 100 × 148 mm (borderless)", [148.0, 100.0, 300.0, 8.0, 1.0, 93.0, 6.0, 3.0, 6.0, 4.0, 3.0])];
+/// Paper presets: id, card title, and the [`LAYOUT_KEYS`] values.
+const PRESETS: [(&str, &str, [f64; 11]); 1] = [("selphy", "Canon Selphy postcard", [148.0, 100.0, 300.0, 8.0, 1.0, 93.0, 6.0, 3.0, 6.0, 4.0, 3.0])];
+const VISIBLE_CARDS: usize = 6;
 
 #[derive(Clone)]
 struct Cached {
@@ -46,6 +63,7 @@ fn valid(key: &str, v: &Value) -> bool {
         "scalePct" => 10.0..=300.0,
         "leftMm" | "topMm" => -100.0..=500.0,
         "trimLeftMm" | "trimRightMm" | "trimTopMm" => 0.0..=50.0,
+        "cutMarks" | "rotate" | "copiesAuto" => return v.is_boolean(),
         _ => return false,
     };
     v.as_f64().is_some_and(|n| range.contains(&n))
@@ -56,7 +74,9 @@ fn templates(app: &PhotocraftApp) -> Vec<Map<String, Value>> {
     saved
         .into_iter()
         .filter_map(|t| t.as_object().cloned())
-        .filter(|t| t.get("name").and_then(Value::as_str).is_some_and(|n| !n.trim().is_empty()) && KEYS.iter().all(|k| t.get(*k).is_none_or(|v| valid(k, v))))
+        .filter(|t| {
+            t.get("name").and_then(Value::as_str).is_some_and(|n| !n.trim().is_empty()) && TEMPLATE_KEYS.iter().all(|k| t.get(*k).is_none_or(|v| valid(k, v)))
+        })
         .collect()
 }
 
@@ -65,22 +85,48 @@ fn store_templates(app: &mut PhotocraftApp, list: Vec<Map<String, Value>>) {
     app.session.prefs.edit(|prefs| prefs.dialogs.insert(TEMPLATES.into(), value));
 }
 
-fn paper_choice(f: &Map<String, Value>) -> String {
-    (if f.get("__preset").and_then(Value::as_str) == Some("selphy") { "selphy" } else { "custom" }).into()
+fn mark_custom(f: &mut Map<String, Value>) {
+    f.insert("__preset".into(), json!("custom"));
 }
 
 fn template_choice(f: &Map<String, Value>) -> String {
     f.get("__preset").and_then(Value::as_str).and_then(|p| p.strip_prefix("t:")).unwrap_or_default().to_string()
 }
 
-/// Applies a built-in preset or a saved template to the dialog's fields.
+fn dimensions(width_mm: f64, height_mm: f64) -> String {
+    format!("{} × {} mm", widgets::fmt_num_prec(width_mm, 1), widgets::fmt_num_prec(height_mm, 1))
+}
+
+fn preset_cards(templates: &[Map<String, Value>]) -> Vec<(String, String, String)> {
+    let mut cards: Vec<_> = templates
+        .iter()
+        .filter_map(|template| {
+            let name = template.get("name")?.as_str()?;
+            let width = template.get("paperWidthMm")?.as_f64()?;
+            let height = template.get("paperHeightMm")?.as_f64()?;
+            Some((format!("t:{name}"), name.to_string(), dimensions(width, height)))
+        })
+        .collect();
+    cards.extend(PRESETS.iter().map(|(id, name, values)| ((*id).to_string(), (*name).to_string(), dimensions(values[0], values[1]))));
+    cards
+}
+
+fn selected_card(f: &Map<String, Value>) -> String {
+    let template = template_choice(f);
+    if template.is_empty() { f.get("__preset").and_then(Value::as_str).unwrap_or("selphy").to_string() } else { format!("t:{template}") }
+}
+
+/// Applies a built-in paper preset or saved complete print template to the dialog's fields.
 fn apply_choice(f: &mut Map<String, Value>, choice: &str, templates: &[Map<String, Value>]) {
     if let Some((_, _, values)) = PRESETS.iter().find(|(id, ..)| *id == choice) {
-        for (k, v) in KEYS.iter().zip(values) {
+        for (k, v) in LAYOUT_KEYS.iter().zip(values) {
             f.insert((*k).into(), json!(v));
         }
+        for (key, value) in [("cutMarks", true), ("rotate", false), ("copiesAuto", true)] {
+            f.insert(key.into(), json!(value));
+        }
     } else if let Some(t) = choice.strip_prefix("t:").and_then(|name| templates.iter().find(|t| t.get("name").and_then(Value::as_str) == Some(name))) {
-        for key in KEYS {
+        for key in TEMPLATE_KEYS {
             if let Some(v) = t.get(key) {
                 f.insert(key.into(), v.clone());
             }
@@ -103,7 +149,7 @@ fn fields(app: &PhotocraftApp) -> Map<String, Value> {
         let preset = saved.get("__preset").and_then(Value::as_str).unwrap_or("selphy");
         let list = templates(app);
         if preset == "custom" {
-            for key in KEYS {
+            for key in TEMPLATE_KEYS {
                 if let Some(value) = saved.get(key).filter(|v| valid(key, v)) {
                     f.insert(key.into(), value.clone());
                 }
@@ -119,7 +165,6 @@ fn fields(app: &PhotocraftApp) -> Map<String, Value> {
                 f.insert(key.into(), b.clone());
             }
         }
-        // The number of copies is chosen per job.
         if let Some(c) = saved.get("copies").filter(|v| valid("copies", v)) {
             f.insert("copies".into(), c.clone());
         }
@@ -159,12 +204,7 @@ fn copies_of(app: &PhotocraftApp, f: &Map<String, Value>) -> Option<u32> {
 pub fn confirm(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Result<Value, String> {
     let result = app.run(COMMAND, params(f));
     if result.is_ok() {
-        let mut remembered: Map<String, Value> = KEYS.iter().filter_map(|k| f.get(*k).map(|v| ((*k).to_string(), v.clone()))).collect();
-        for key in ["cutMarks", "rotate", "copiesAuto"] {
-            if let Some(v) = f.get(key) {
-                remembered.insert(key.into(), v.clone());
-            }
-        }
+        let mut remembered: Map<String, Value> = TEMPLATE_KEYS.iter().filter_map(|k| f.get(*k).map(|v| ((*k).to_string(), v.clone()))).collect();
         remembered.insert("__preset".into(), f.get("__preset").cloned().unwrap_or(Value::Null));
         app.session.prefs.edit(|prefs| prefs.dialogs.insert(COMMAND.into(), Value::Object(remembered)));
     }
@@ -268,7 +308,7 @@ fn mm_row(ui: &mut egui::Ui, f: &mut Map<String, Value>, key: &str, label: &str,
         let mut v = num(f, key, 0.0) as f32;
         if widgets::value_field_prec(ui, &mut v, range, suffix, 70.0, 1).changed() {
             f.insert(key.into(), json!(v));
-            f.insert("__preset".into(), json!("custom"));
+            mark_custom(f);
         }
     });
 }
@@ -277,22 +317,47 @@ fn settings_pane(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String,
     let mut saved = templates(app);
     ui.vertical(|ui| {
         ui.set_width(ui.available_width());
-        widgets::section_label(ui, "Print Job");
+        widgets::section_label(ui, "Paper & Templates");
         widgets::hairline(ui);
-        let mut paper = paper_choice(f);
-        ui.horizontal(|ui| {
-            let label_width = (ui.available_width() - 178.0).max(24.0);
-            widgets::elided_label(ui, "Paper size", label_width);
-            let options = [("selphy".to_string(), PRESETS[0].1), ("custom".to_string(), tl!("Custom"))];
-            if widgets::dropdown(ui, "selphy-paper", &mut paper, &options, 170.0) {
-                let copies = f.get("copies").cloned();
-                apply_choice(f, &paper, &saved);
-                // The number of copies belongs to the print job, not the paper preset.
-                if let Some(copies) = copies {
-                    f.insert("copies".into(), copies);
+        let mut cards = preset_cards(&saved);
+        let mut choice = selected_card(f);
+        if let Some(selected) = cards.iter().position(|(id, ..)| id == &choice)
+            && selected > 0
+        {
+            cards.swap(0, selected);
+        }
+        let expanded = f.get("__showMore").and_then(Value::as_bool).unwrap_or(false);
+        let visible_count = if expanded { cards.len() } else { cards.len().min(VISIBLE_CARDS) };
+        ui.columns(2, |columns| {
+            for (index, (id, name, detail)) in cards.iter().take(visible_count).enumerate() {
+                let column = index % 2;
+                let response = widgets::preset_card(&mut columns[column], name, detail, choice == *id);
+                if response.clicked() {
+                    choice.clone_from(id);
+                    apply_choice(f, id, &saved);
                 }
+                columns[column].add_space(5.0);
             }
         });
+        if cards.len() > VISIBLE_CARDS {
+            let hidden = cards.len().saturating_sub(VISIBLE_CARDS);
+            let label = if expanded { "Show less".to_string() } else { format!("Show more ({hidden})") };
+            if ui.button(label).clicked() {
+                f.insert("__showMore".into(), json!(!expanded));
+            }
+        }
+        if ui.selectable_label(choice == "custom", "Custom dimensions…").clicked() {
+            choice = "custom".into();
+            apply_choice(f, &choice, &saved);
+        }
+        if choice == "custom" || choice.starts_with("t:") {
+            mm_row(ui, f, "paperWidthMm", tl!("Width"), 20.0..=1000.0, "mm");
+            mm_row(ui, f, "paperHeightMm", tl!("Height"), 20.0..=1000.0, "mm");
+        }
+
+        ui.add_space(8.0);
+        widgets::section_label(ui, "Print Job");
+        widgets::hairline(ui);
         ui.horizontal(|ui| {
             let label_width = (ui.available_width() - 170.0).max(24.0);
             widgets::elided_label(ui, "Copies", label_width);
@@ -304,12 +369,14 @@ fn settings_pane(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String,
                     f.insert("copies".into(), json!(copies_of(app, f).unwrap_or(8)));
                 }
                 f.insert("copiesAuto".into(), json!(auto));
+                mark_custom(f);
             }
             if auto {
                 copies = copies_of(app, f).unwrap_or(1) as f32;
                 ui.add_enabled_ui(false, |ui| widgets::value_field_prec(ui, &mut copies, 1.0..=100.0, "", 70.0, 0));
             } else if widgets::value_field_prec(ui, &mut copies, 1.0..=100.0, "", 70.0, 0).changed() {
                 f.insert("copies".into(), json!(copies.round().clamp(1.0, 100.0)));
+                mark_custom(f);
             }
         });
         ui.horizontal(|ui| {
@@ -318,34 +385,18 @@ fn settings_pane(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String,
             let mut o = if f.get("rotate").and_then(Value::as_bool).unwrap_or(false) { "horizontal" } else { "vertical" }.to_string();
             if widgets::dropdown(ui, "selphy-orient", &mut o, &[("vertical".to_string(), "Vertical"), ("horizontal".to_string(), "Horizontal")], 130.0) {
                 f.insert("rotate".into(), json!(o == "horizontal"));
+                mark_custom(f);
             }
         });
         let mut margin = f.get("cutMarks").and_then(Value::as_bool).unwrap_or(true);
         if widgets::checkbox(ui, &mut margin, "Print cut guides").changed() {
             f.insert("cutMarks".into(), json!(margin));
-        }
-        if paper == "custom" {
-            mm_row(ui, f, "paperWidthMm", tl!("Width"), 20.0..=1000.0, "mm");
-            mm_row(ui, f, "paperHeightMm", tl!("Height"), 20.0..=1000.0, "mm");
+            mark_custom(f);
         }
 
         ui.add_space(8.0);
-        widgets::section_label(ui, "Templates");
+        widgets::section_label(ui, "Save Template");
         widgets::hairline(ui);
-        let current_template = match template_choice(f).as_str() {
-            "" => None,
-            name => Some(name.to_string()),
-        };
-        let mut template = current_template.clone().unwrap_or_default();
-        let mut template_options = vec![(String::new(), "Choose a saved template…")];
-        template_options.extend(saved.iter().filter_map(|t| t.get("name").and_then(Value::as_str).map(|n| (n.to_string(), n))));
-        if widgets::dropdown(ui, "selphy-template", &mut template, &template_options, ui.available_width()) {
-            if template.is_empty() {
-                f.insert("__preset".into(), json!("custom"));
-            } else {
-                apply_choice(f, &format!("t:{template}"), &saved);
-            }
-        }
         let mut name = f.get("__tplName").and_then(Value::as_str).unwrap_or_default().to_string();
         ui.horizontal(|ui| {
             let field_width = (ui.available_width() - 140.0).max(70.0);
@@ -354,19 +405,18 @@ fn settings_pane(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String,
             }
             let name = name.trim().to_string();
             if ui.add_enabled(!name.is_empty(), egui::Button::new(tl!("Save"))).clicked() {
-                let mut t: Map<String, Value> = KEYS.iter().filter_map(|k| f.get(*k).map(|v| ((*k).to_string(), v.clone()))).collect();
+                let mut t: Map<String, Value> = TEMPLATE_KEYS.iter().filter_map(|k| f.get(*k).map(|v| ((*k).to_string(), v.clone()))).collect();
                 t.insert("name".into(), json!(name));
                 saved.retain(|s| s.get("name").and_then(Value::as_str) != Some(name.as_str()));
                 saved.push(t);
                 store_templates(app, saved.clone());
                 f.insert("__preset".into(), json!(format!("t:{name}")));
             }
-            if ui.add_enabled(current_template.is_some(), egui::Button::new(tl!("Delete"))).clicked()
-                && let Some(current) = current_template
-            {
-                saved.retain(|s| s.get("name").and_then(Value::as_str) != Some(current.as_str()));
+            let current_template = template_choice(f);
+            if ui.add_enabled(!current_template.is_empty(), egui::Button::new(tl!("Delete"))).clicked() && !current_template.is_empty() {
+                saved.retain(|s| s.get("name").and_then(Value::as_str) != Some(current_template.as_str()));
                 store_templates(app, saved.clone());
-                f.insert("__preset".into(), json!("custom"));
+                mark_custom(f);
             }
         });
 
@@ -378,7 +428,7 @@ fn settings_pane(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String,
                 let mut v = num(f, "dpi", 300.0) as f32;
                 if widgets::value_field(ui, &mut v, 72.0..=1200.0, "dpi", 80.0).changed() {
                     f.insert("dpi".into(), json!(v.round()));
-                    f.insert("__preset".into(), json!("custom"));
+                    mark_custom(f);
                 }
             });
         });
@@ -406,18 +456,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn saved_layout_choice_stays_separate_from_the_paper_choice() {
+    fn saved_layouts_are_choices_in_the_paper_preset_grid() {
         let mut f = Map::new();
         f.insert("__preset".into(), json!("selphy"));
-        assert_eq!(paper_choice(&f), "selphy");
+        assert_eq!(selected_card(&f), "selphy");
         assert_eq!(template_choice(&f), "");
 
         f.insert("__preset".into(), json!("t:Family Print"));
-        assert_eq!(paper_choice(&f), "custom");
+        assert_eq!(selected_card(&f), "t:Family Print");
         assert_eq!(template_choice(&f), "Family Print");
 
         f.insert("__preset".into(), json!("custom"));
-        assert_eq!(paper_choice(&f), "custom");
+        assert_eq!(selected_card(&f), "custom");
         assert_eq!(template_choice(&f), "");
+    }
+
+    #[test]
+    fn template_card_shows_paper_dimensions_and_restores_full_print_setup() {
+        let template = serde_json::from_value::<Map<String, Value>>(json!({
+            "name": "Family",
+            "paperWidthMm": 100.0,
+            "paperHeightMm": 148.0,
+            "dpi": 600.0,
+            "copies": 6.0,
+            "gapMm": 2.0,
+            "scalePct": 95.0,
+            "leftMm": 4.0,
+            "topMm": 5.0,
+            "trimLeftMm": 1.0,
+            "trimRightMm": 2.0,
+            "trimTopMm": 3.0,
+            "cutMarks": false,
+            "rotate": true,
+            "copiesAuto": false
+        }))
+        .unwrap_or_default();
+        assert!(TEMPLATE_KEYS.iter().all(|key| template.get(*key).is_some_and(|value| valid(key, value))));
+
+        let cards = preset_cards(std::slice::from_ref(&template));
+        assert_eq!(cards.first(), Some(&("t:Family".into(), "Family".into(), "100 × 148 mm".into())));
+
+        let mut f = Map::new();
+        apply_choice(&mut f, "t:Family", std::slice::from_ref(&template));
+        for key in TEMPLATE_KEYS {
+            assert_eq!(f.get(key), template.get(key), "template restores `{key}`");
+        }
     }
 }

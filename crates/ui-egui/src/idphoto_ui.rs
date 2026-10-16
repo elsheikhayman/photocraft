@@ -20,23 +20,22 @@ const KEYS: [&str; 5] = ["widthMm", "heightMm", "dpi", "facePct", "eyeFromBottom
 /// The largest bitmap rendered for the preview, and the settings dock's width, in points.
 const PREVIEW_PX: f64 = 800.0;
 const PANEL_W: f32 = 340.0;
-/// Photo sizes the Photo Size list offers: id, label, width mm, height mm.
+/// Built-in photo sizes: id, card title, width mm, height mm.
 const PRESETS: [(&str, &str, f64, f64); 6] = [
-    ("35x45", "35 × 45 mm (Schengen / ICAO)", 35.0, 45.0),
-    ("50x50", "50 × 50 mm", 50.0, 50.0),
-    ("40x40", "40 × 40 mm", 40.0, 40.0),
-    ("40x50", "40 × 50 mm", 40.0, 50.0),
-    ("30x40", "30 × 40 mm", 30.0, 40.0),
-    ("51x51", "51 × 51 mm (US 2 × 2 in)", 50.8, 50.8),
+    ("35x45", "Schengen / ICAO", 35.0, 45.0),
+    ("50x50", "Square · 50 mm", 50.0, 50.0),
+    ("40x40", "Square · 40 mm", 40.0, 40.0),
+    ("40x50", "Portrait · 4:5", 40.0, 50.0),
+    ("30x40", "Portrait · 3:4", 30.0, 40.0),
+    ("51x51", "US passport (2 × 2 in)", 50.8, 50.8),
 ];
 /// The default face height as a percentage of the photo height (33.5 mm of 45 mm).
 const FACE_PCT: f64 = 74.5;
-/// The face height range the 35 x 45 mm standard asks for, mm.
-const STANDARD_FACE_MM: (f64, f64) = (31.0, 36.0);
 /// The ranges the sliders allow, as (min, max).
 const FACE_RANGE: (f32, f32) = (50.0, 90.0);
 const EYE_RANGE: (f32, f32) = (40.0, 70.0);
 const H_RANGE: (f32, f32) = (-25.0, 25.0);
+const VISIBLE_CARDS: usize = 6;
 
 #[derive(Clone)]
 struct Cached {
@@ -86,6 +85,19 @@ fn store_templates(app: &mut PhotocraftApp, list: Vec<Map<String, Value>>) {
     app.session.prefs.edit(|prefs| prefs.dialogs.insert(TEMPLATES.into(), value));
 }
 
+fn mark_template_modified(f: &mut Map<String, Value>) {
+    let size = size_choice(f);
+    f.insert("__photoSize".into(), json!(size));
+    f.insert("__template".into(), json!(""));
+    f.insert("__preset".into(), json!(size));
+}
+
+fn mark_custom_size(f: &mut Map<String, Value>) {
+    f.insert("__photoSize".into(), json!("custom"));
+    f.insert("__template".into(), json!(""));
+    f.insert("__preset".into(), json!("custom"));
+}
+
 /// Dialog fields: the defaults for a 35 x 45 mm photo, then the valid values used last time.
 fn fields(app: &PhotocraftApp, face: Value) -> Map<String, Value> {
     let mut f = Map::new();
@@ -93,6 +105,8 @@ fn fields(app: &PhotocraftApp, face: Value) -> Map<String, Value> {
     f.insert("__command".into(), json!(COMMAND));
     f.insert("__label".into(), json!("ID Photo…"));
     f.insert("__preset".into(), json!("35x45"));
+    f.insert("__photoSize".into(), json!("35x45"));
+    f.insert("__template".into(), json!(""));
     f.insert("face".into(), face);
     for (k, v) in [("widthMm", 35.0), ("heightMm", 45.0), ("dpi", 300.0), ("facePct", FACE_PCT), ("eyeFromBottomPct", 56.0), ("hOffsetPct", 0.0)] {
         f.insert(k.into(), json!(v));
@@ -100,19 +114,34 @@ fn fields(app: &PhotocraftApp, face: Value) -> Map<String, Value> {
     // Each time the tool opens, the settings are the last chosen size's own values (a built-in size
     // or a saved template), or the last custom values; H Position always starts at 0.
     if let Some(Value::Object(saved)) = app.session.prefs().dialogs.get(COMMAND) {
-        let preset = saved.get("__preset").and_then(Value::as_str).unwrap_or("35x45");
-        if preset == "custom" {
-            for key in KEYS {
-                if let Some(value) = saved.get(key).filter(|v| valid(key, v)) {
-                    f.insert(key.into(), value.clone());
-                }
-            }
-            f.insert("__preset".into(), json!("custom"));
+        let legacy_preset = saved.get("__preset").and_then(Value::as_str).unwrap_or("35x45");
+        let saved_templates = templates(app);
+        let selected_template = saved.get("__template").and_then(Value::as_str).filter(|name| !name.is_empty()).or_else(|| legacy_preset.strip_prefix("t:"));
+        if let Some(name) = selected_template.filter(|name| saved_templates.iter().any(|t| t.get("name").and_then(Value::as_str) == Some(name))) {
+            apply_choice(&mut f, &format!("t:{name}"), &saved_templates);
         } else {
-            let saved_templates = templates(app);
-            let known = PRESETS.iter().any(|(id, ..)| *id == preset)
-                || preset.strip_prefix("t:").is_some_and(|n| saved_templates.iter().any(|t| t.get("name").and_then(Value::as_str) == Some(n)));
-            apply_choice(&mut f, if known { preset } else { "35x45" }, &saved_templates);
+            let saved_size = saved
+                .get("__photoSize")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| if PRESETS.iter().any(|(id, ..)| *id == legacy_preset) { legacy_preset } else { "custom" });
+            if PRESETS.iter().any(|(id, ..)| *id == saved_size) {
+                apply_choice(&mut f, saved_size, &saved_templates);
+                // Built-in sizes retain fine face and output settings across launches.
+                for key in ["dpi", "facePct", "eyeFromBottomPct"] {
+                    if let Some(value) = saved.get(key).filter(|v| valid(key, v)) {
+                        f.insert(key.into(), value.clone());
+                    }
+                }
+            } else {
+                for key in KEYS {
+                    if let Some(value) = saved.get(key).filter(|v| valid(key, v)) {
+                        f.insert(key.into(), value.clone());
+                    }
+                }
+                f.insert("__preset".into(), json!("custom"));
+                f.insert("__photoSize".into(), json!("custom"));
+                f.insert("__template".into(), json!(""));
+            }
         }
     }
     f
@@ -148,7 +177,9 @@ fn default_face(app: &PhotocraftApp, f: &Map<String, Value>) -> Result<Value, St
     let face_h = (frame_h * num(f, "facePct", FACE_PCT) / 100.0).max(2.0);
     let face_w = face_h * 0.75;
     let eye_y = h / 2.0 - frame_h / 2.0 + (1.0 - num(f, "eyeFromBottomPct", 56.0) / 100.0) * frame_h;
-    Ok(json!({"x": (w / 2.0 - face_w / 2.0).round() as i64, "y": (eye_y - face_h / 2.0).round() as i64, "width": face_w.round() as i64, "height": face_h.round() as i64}))
+    Ok(
+        json!({"x": (w / 2.0 - face_w / 2.0).round() as i64, "y": (eye_y - face_h / 2.0).round() as i64, "width": face_w.round() as i64, "height": face_h.round() as i64}),
+    )
 }
 
 /// The engine parameters: the settings (the face size as mm of the photo height) and the face.
@@ -168,6 +199,8 @@ pub fn confirm(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Result<Value,
     if result.is_ok() {
         let mut remembered: Map<String, Value> = KEYS.iter().filter_map(|k| f.get(*k).map(|v| (k.to_string(), v.clone()))).collect();
         remembered.insert("__preset".into(), f.get("__preset").cloned().unwrap_or(Value::Null));
+        remembered.insert("__photoSize".into(), f.get("__photoSize").cloned().unwrap_or(Value::Null));
+        remembered.insert("__template".into(), f.get("__template").cloned().unwrap_or(Value::Null));
         app.session.prefs.edit(|prefs| prefs.dialogs.insert(COMMAND.into(), Value::Object(remembered)));
     }
     result
@@ -251,7 +284,10 @@ fn drop_line(f: &mut Map<String, Value>, line: u8, at: f64, canvas: (f64, f64)) 
         // The eyes stay on the same spot of the picture while the face rectangle changes around them.
         f.insert("eyeInFace".into(), json!(((eye_src - ny0) / (ny1 - ny0)).clamp(0.0, 1.0)));
     }
-    f.insert("face".into(), json!({"x": nx0.round() as i64, "y": ny0.round() as i64, "width": (nx1 - nx0).round() as i64, "height": (ny1 - ny0).round() as i64}));
+    f.insert(
+        "face".into(),
+        json!({"x": nx0.round() as i64, "y": ny0.round() as i64, "width": (nx1 - nx0).round() as i64, "height": (ny1 - ny0).round() as i64}),
+    );
 }
 
 /// The live preview of the finished photo, with its guides, centred in `area`. The head top, eye,
@@ -264,11 +300,17 @@ fn preview_pane(app: &PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
     p.rect_filled(area, 0.0, t.canvas);
     match preview(app, ui.ctx(), f) {
         Ok((texture, lay)) => {
-            let room = area.shrink2(vec2(70.0, 44.0));
+            let room = area.shrink2(vec2(70.0, 64.0));
             let k = (room.width() / lay.out_width_px as f32).min(room.height() / lay.out_height_px as f32).max(0.01);
             let size = vec2(lay.out_width_px as f32 * k, lay.out_height_px as f32 * k);
             let image = Rect::from_center_size(area.center(), size);
-            p.text(pos2(image.center().x, image.top() - 10.0), Align2::CENTER_CENTER, format!("{width_mm:.0} mm"), egui::FontId::proportional(11.0), t.text_dim);
+            p.text(
+                pos2(image.center().x, image.top() - 10.0),
+                Align2::CENTER_CENTER,
+                format!("{width_mm:.0} mm"),
+                egui::FontId::proportional(11.0),
+                t.text_dim,
+            );
             p.image(texture.id(), image, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
             p.rect_stroke(image, 0.0, Stroke::new(1.0, t.field_border), egui::StrokeKind::Outside);
             let at = |mm: f64| image.top() + (mm / height_mm) as f32 * size.y;
@@ -281,17 +323,30 @@ fn preview_pane(app: &PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
                 *slot = if i < 3 { v.clamp(image.top(), image.bottom()) } else { v.clamp(image.left(), image.right()) };
             }
             let mm_at = |y: f32| ((y - image.top()) / size.y) as f64 * height_mm;
-            p.line_segment([pos2(pos[3], image.top()), pos2(pos[3], image.bottom())], Stroke::new(1.0, Color32::from_rgb(255, 80, 80)));
+            p.line_segment([pos2(pos[3], image.top()), pos2(pos[3], image.bottom())], Stroke::new(1.0, t.danger));
             guide(ui, image, pos[0], "Head Top", &format!("{:.1} mm", mm_at(pos[0])), t.accent);
             guide(ui, image, pos[1], "Eye Line", &format!("{:.1} mm", height_mm - mm_at(pos[1])), t.accent);
             guide(ui, image, pos[2], "Chin Line", &format!("{:.1} mm", height_mm - mm_at(pos[2])), t.accent);
-            p.text(pos2(image.right() + 8.0, image.center().y), Align2::LEFT_CENTER, format!("{height_mm:.0} mm"), egui::FontId::proportional(11.0), t.text_dim);
+            p.text(
+                pos2(image.right() + 8.0, image.center().y),
+                Align2::LEFT_CENTER,
+                format!("{height_mm:.0} mm"),
+                egui::FontId::proportional(11.0),
+                t.text_dim,
+            );
             let dpi = num(f, "dpi", 300.0);
+            p.text(
+                pos2(area.center().x, area.bottom() - 34.0),
+                Align2::CENTER_CENTER,
+                "Drag guides to align · Arrow keys nudge 1 px (Shift: 10 px)",
+                egui::FontId::proportional(10.0),
+                t.text_dim,
+            );
             p.text(
                 pos2(area.center().x, area.bottom() - 14.0),
                 Align2::CENTER_CENTER,
-                format!("{}×{} px · {} {:.1} mm", (width_mm / 25.4 * dpi).round(), (height_mm / 25.4 * dpi).round(), "Face", lay.chin_mm - lay.head_top_mm),
-                egui::FontId::proportional(12.0),
+                format!("{}×{} px · face {:.1} mm", (width_mm / 25.4 * dpi).round(), (height_mm / 25.4 * dpi).round(), lay.chin_mm - lay.head_top_mm),
+                egui::FontId::proportional(11.0),
                 t.text_dim,
             );
             // Dragging: a line follows the pointer; on drop the settings are re-fitted to it.
@@ -299,14 +354,21 @@ fn preview_pane(app: &PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
             for i in 0..4u8 {
                 let v = pos[usize::from(i)];
                 let hit = if i < 3 {
-                    Rect::from_min_max(pos2(image.left(), v - 5.0), pos2(image.right(), v + 5.0))
+                    Rect::from_min_max(pos2(image.left(), v - 7.0), pos2(image.right(), v + 7.0))
                 } else {
-                    Rect::from_min_max(pos2(v - 5.0, image.top()), pos2(v + 5.0, image.bottom()))
+                    Rect::from_min_max(pos2(v - 7.0, image.top()), pos2(v + 7.0, image.bottom()))
                 };
                 let r = ui.interact(hit, egui::Id::new(("idphoto-line", i)), Sense::drag());
                 if r.hovered() || r.dragged() {
                     ui.ctx().set_cursor_icon(if i < 3 { egui::CursorIcon::ResizeVertical } else { egui::CursorIcon::ResizeHorizontal });
                 }
+                let guide_name = match i {
+                    0 => "Head Top",
+                    1 => "Eye Line",
+                    2 => "Chin Line",
+                    _ => "Vertical Center",
+                };
+                let r = r.on_hover_text(format!("Drag {guide_name} to adjust the photo framing"));
                 if let Some(pt) = r.interact_pointer_pos().filter(|_| r.dragged() || r.drag_stopped()) {
                     let coord = if i < 3 { pt.y } else { pt.x };
                     ui.ctx().data_mut(|d| d.insert_temp(drag_id, (i, coord)));
@@ -337,6 +399,7 @@ fn preview_pane(app: &PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
 /// offset already represents the image's horizontal placement; changing the eye's output position
 /// shifts the crop vertically while keeping the face rectangle itself unchanged.
 fn nudge_position(f: &mut Map<String, Value>, dx: f64, dy: f64, multiplier: f64) {
+    let before = (num(f, "hOffsetPct", 0.0), num(f, "eyeFromBottomPct", 56.0));
     let width_px = (num(f, "widthMm", 35.0) * num(f, "dpi", 300.0) / 25.4).round().max(1.0);
     let height_px = (num(f, "heightMm", 45.0) * num(f, "dpi", 300.0) / 25.4).round().max(1.0);
     let h_step = 100.0 * multiplier / width_px;
@@ -349,6 +412,9 @@ fn nudge_position(f: &mut Map<String, Value>, dx: f64, dy: f64, multiplier: f64)
         // A larger eye-from-bottom value moves the image up in the output frame.
         let eye_from_bottom = (num(f, "eyeFromBottomPct", 56.0) - dy * v_step).clamp(f64::from(EYE_RANGE.0), f64::from(EYE_RANGE.1));
         f.insert("eyeFromBottomPct".into(), json!(eye_from_bottom));
+    }
+    if (num(f, "hOffsetPct", 0.0), num(f, "eyeFromBottomPct", 56.0)) != before {
+        mark_template_modified(f);
     }
 }
 
@@ -379,6 +445,7 @@ fn slider(ui: &mut egui::Ui, f: &mut Map<String, Value>, key: &str, label: &str,
     let mut v = (num(f, key, default) as f32).clamp(range.0, range.1);
     if widgets::slider_row(ui, label, &mut v, range.0..=range.1, suffix, None).changed() {
         f.insert(key.into(), json!(v));
+        mark_template_modified(f);
     }
 }
 
@@ -388,14 +455,71 @@ fn apply_choice(f: &mut Map<String, Value>, choice: &str, templates: &[Map<Strin
         f.insert("widthMm".into(), json!(w));
         f.insert("heightMm".into(), json!(h));
         f.insert("facePct".into(), json!(FACE_PCT));
+        f.insert("__photoSize".into(), json!(choice));
+        f.insert("__template".into(), json!(""));
     } else if let Some(t) = choice.strip_prefix("t:").and_then(|name| templates.iter().find(|t| t.get("name").and_then(Value::as_str) == Some(name))) {
         for key in KEYS {
             if let Some(v) = t.get(key) {
                 f.insert(key.into(), v.clone());
             }
         }
+        f.insert("__photoSize".into(), json!("custom"));
+        f.insert("__template".into(), json!(t.get("name").and_then(Value::as_str).unwrap_or_default()));
+    } else {
+        f.insert("__photoSize".into(), json!("custom"));
+        f.insert("__template".into(), json!(""));
     }
     f.insert("__preset".into(), json!(choice));
+}
+
+fn size_choice(f: &Map<String, Value>) -> String {
+    let preset = f.get("__photoSize").and_then(Value::as_str).or_else(|| f.get("__preset").and_then(Value::as_str)).unwrap_or("custom");
+    if preset == "custom" || PRESETS.iter().any(|(id, ..)| *id == preset) { preset.to_string() } else { "custom".into() }
+}
+
+fn template_choice(f: &Map<String, Value>) -> String {
+    f.get("__template")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .or_else(|| f.get("__preset").and_then(Value::as_str).and_then(|preset| preset.strip_prefix("t:")))
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn dimension_label(width_mm: f64, height_mm: f64) -> String {
+    format!("{} × {} mm", widgets::fmt_num_prec(width_mm, 1), widgets::fmt_num_prec(height_mm, 1))
+}
+
+fn preset_cards(templates: &[Map<String, Value>]) -> Vec<(String, String, String)> {
+    let mut cards: Vec<_> = templates
+        .iter()
+        .filter_map(|template| {
+            let name = template.get("name")?.as_str()?;
+            let width = template.get("widthMm")?.as_f64()?;
+            let height = template.get("heightMm")?.as_f64()?;
+            Some((format!("t:{name}"), name.to_string(), dimension_label(width, height)))
+        })
+        .collect();
+    cards.extend(PRESETS.iter().map(|(id, name, width, height)| ((*id).to_string(), (*name).to_string(), dimension_label(*width, *height))));
+    cards
+}
+
+fn face_height_mm(face_pct: f64, output_height_mm: f64) -> f64 {
+    face_pct * output_height_mm / 100.0
+}
+
+fn face_pct(face_height_mm: f64, output_height_mm: f64) -> f64 {
+    (face_height_mm / output_height_mm.max(1.0) * 100.0).clamp(f64::from(FACE_RANGE.0), f64::from(FACE_RANGE.1))
+}
+
+fn face_height_slider(ui: &mut egui::Ui, f: &mut Map<String, Value>, height_mm: f64) {
+    let mut height = face_height_mm(num(f, "facePct", FACE_PCT), height_mm) as f32;
+    let range = (FACE_RANGE.0 * height_mm as f32 / 100.0)..=(FACE_RANGE.1 * height_mm as f32 / 100.0);
+    height = height.clamp(*range.start(), *range.end());
+    if widgets::slider_row(ui, "Face height", &mut height, range, "mm", None).changed() {
+        f.insert("facePct".into(), json!(face_pct(f64::from(height), height_mm)));
+        mark_template_modified(f);
+    }
 }
 
 fn settings_pane(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
@@ -403,54 +527,79 @@ fn settings_pane(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String,
     let mut saved = templates(app);
     ui.vertical(|ui| {
         ui.set_width(ui.available_width());
-        widgets::section_label(ui, "Photo Settings");
+        widgets::section_label(ui, "Photo Presets & Templates");
         widgets::hairline(ui);
-        ui.label("Photo Size");
-        let mut choice = f.get("__preset").and_then(Value::as_str).unwrap_or("custom").to_string();
-        let mut options: Vec<(String, String)> = PRESETS.iter().map(|(id, label, ..)| (id.to_string(), label.to_string())).collect();
-        options.extend(saved.iter().filter_map(|t| t.get("name").and_then(Value::as_str)).map(|n| (format!("t:{n}"), n.to_string())));
-        options.push(("custom".into(), tl!("Custom").to_string()));
-        let shown: Vec<(String, &str)> = options.iter().map(|(id, label)| (id.clone(), label.as_str())).collect();
-        if widgets::dropdown(ui, "idphoto-preset", &mut choice, &shown, 300.0) {
-            apply_choice(f, &choice, &saved);
+        let mut cards = preset_cards(&saved);
+        let active_template = template_choice(f);
+        let mut choice = if active_template.is_empty() { size_choice(f) } else { format!("t:{active_template}") };
+        if let Some(selected) = cards.iter().position(|(id, ..)| id == &choice)
+            && selected > 0
+        {
+            cards.swap(0, selected);
         }
-        ui.horizontal(|ui| {
-            for (key, label) in [("widthMm", tl!("Width")), ("heightMm", tl!("Height"))] {
-                ui.label(label);
-                let mut v = num(f, key, 35.0) as f32;
-                if widgets::value_field_prec(ui, &mut v, 10.0..=200.0, "mm", 70.0, 1).changed() {
-                    f.insert(key.into(), json!(v));
-                    f.insert("__preset".into(), json!("custom"));
+        let expanded = f.get("__showMore").and_then(Value::as_bool).unwrap_or(false);
+        let visible_count = if expanded { cards.len() } else { cards.len().min(VISIBLE_CARDS) };
+        ui.columns(2, |columns| {
+            for (index, (id, name, dimensions)) in cards.iter().take(visible_count).enumerate() {
+                let column = index % 2;
+                let response = widgets::preset_card(&mut columns[column], name, dimensions, choice == *id);
+                if response.clicked() {
+                    choice.clone_from(id);
+                    apply_choice(f, id, &saved);
                 }
+                columns[column].add_space(5.0);
             }
         });
+        if cards.len() > VISIBLE_CARDS {
+            let extra = cards.len().saturating_sub(VISIBLE_CARDS);
+            let label = if expanded { "Show less".to_string() } else { format!("Show more ({extra})") };
+            if ui.button(label).clicked() {
+                f.insert("__showMore".into(), json!(!expanded));
+            }
+        }
+        if ui.selectable_label(choice == "custom", "Custom dimensions…").clicked() {
+            choice = "custom".into();
+            apply_choice(f, &choice, &saved);
+        }
+        if size_choice(f) == "custom" {
+            ui.horizontal(|ui| {
+                for (key, label) in [("widthMm", tl!("Width")), ("heightMm", tl!("Height"))] {
+                    ui.label(label);
+                    let mut v = num(f, key, 35.0) as f32;
+                    if widgets::value_field_prec(ui, &mut v, 10.0..=200.0, "mm", 70.0, 1).changed() {
+                        f.insert(key.into(), json!(v));
+                        mark_custom_size(f);
+                    }
+                }
+            });
+        }
         ui.horizontal(|ui| {
-            ui.label(tl!("Resolution"));
+            let label_width = (ui.available_width() - 86.0).max(24.0);
+            widgets::elided_label(ui, tl!("Resolution"), label_width);
             let mut v = num(f, "dpi", 300.0) as f32;
             if widgets::value_field(ui, &mut v, 72.0..=1200.0, "dpi", 80.0).changed() {
                 f.insert("dpi".into(), json!(v.round()));
+                mark_custom_size(f);
             }
         });
-        ui.add_space(6.0);
-        let height = num(f, "heightMm", 45.0);
-        let face_mm = num(f, "facePct", FACE_PCT) / 100.0 * height;
-        slider(ui, f, "facePct", "Face Size", FACE_RANGE, "%", FACE_PCT);
-        let standard = (num(f, "widthMm", 35.0) - 35.0).abs() < 0.05 && (height - 45.0).abs() < 0.05;
-        let in_range = (STANDARD_FACE_MM.0..=STANDARD_FACE_MM.1).contains(&face_mm);
-        let hint = if standard {
-            format!("{face_mm:.1} mm · {} {:.0}–{:.0} mm", "standard", STANDARD_FACE_MM.0, STANDARD_FACE_MM.1)
-        } else {
-            format!("{face_mm:.1} mm")
-        };
-        ui.colored_label(if standard && !in_range { t.warning } else { t.text_dim }, hint);
+
+        ui.add_space(8.0);
+        widgets::section_label(ui, "Face Alignment");
+        widgets::hairline(ui);
+        let height = num(f, "heightMm", 45.0).clamp(10.0, 200.0);
+        face_height_slider(ui, f, height);
+        ui.colored_label(t.text_dim, format!("{:.1}% of photo height", num(f, "facePct", FACE_PCT)));
         slider(ui, f, "eyeFromBottomPct", "Eye Position From Bottom", EYE_RANGE, "%", 56.0);
         slider(ui, f, "hOffsetPct", "H Position", H_RANGE, "%", 0.0);
-        ui.add_space(6.0);
-        widgets::section_label(ui, "Templates");
+        ui.colored_label(t.text_dim, "Arrow keys nudge 1 px · Shift + arrows: 10 px");
+
+        ui.add_space(8.0);
+        widgets::section_label(ui, "Save Template");
         widgets::hairline(ui);
         let mut name = f.get("__tplName").and_then(Value::as_str).unwrap_or_default().to_string();
         ui.horizontal(|ui| {
-            if ui.add(egui::TextEdit::singleline(&mut name).hint_text("Template name").desired_width(150.0)).changed() {
+            let field_width = (ui.available_width() - 120.0).max(70.0);
+            if ui.add(egui::TextEdit::singleline(&mut name).hint_text("Template name").desired_width(field_width)).changed() {
                 f.insert("__tplName".into(), json!(name));
             }
             let name = name.trim().to_string();
@@ -461,14 +610,14 @@ fn settings_pane(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String,
                 saved.push(t);
                 store_templates(app, saved.clone());
                 f.insert("__preset".into(), json!(format!("t:{name}")));
+                f.insert("__photoSize".into(), json!("custom"));
+                f.insert("__template".into(), json!(name));
             }
-            let current = f.get("__preset").and_then(Value::as_str).and_then(|p| p.strip_prefix("t:")).map(str::to_string);
-            if ui.add_enabled(current.is_some(), egui::Button::new(tl!("Delete"))).clicked()
-                && let Some(current) = current
-            {
+            let current = template_choice(f);
+            if ui.add_enabled(!current.is_empty(), egui::Button::new(tl!("Delete"))).clicked() && !current.is_empty() {
                 saved.retain(|s| s.get("name").and_then(Value::as_str) != Some(current.as_str()));
                 store_templates(app, saved.clone());
-                f.insert("__preset".into(), json!("custom"));
+                mark_template_modified(f);
             }
         });
     });
@@ -531,7 +680,10 @@ pub fn shell(
             ui.painter().line_segment([bar.left_top(), bar.right_top()], Stroke::new(1.0, t.separator));
             let mut footer = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(16.0, 10.0))).layout(egui::Layout::right_to_left(egui::Align::Min)));
             footer.spacing_mut().item_spacing.x = 10.0;
-            let buttons = [widgets::DialogButton::new(widgets::ButtonRole::Default, tl!("OK"), 84.0), widgets::DialogButton::new(widgets::ButtonRole::Cancel, tl!("Cancel"), 84.0)];
+            let buttons = [
+                widgets::DialogButton::new(widgets::ButtonRole::Default, tl!("OK"), 84.0),
+                widgets::DialogButton::new(widgets::ButtonRole::Cancel, tl!("Cancel"), 84.0),
+            ];
             match widgets::dialog_buttons(&mut footer, &buttons) {
                 Some(widgets::ButtonRole::Cancel) => outcome = Some(false),
                 Some(_) => outcome = Some(true),
@@ -568,8 +720,7 @@ mod position_key_tests {
 
     fn press(ctx: &egui::Context, f: &mut Map<String, Value>, key: egui::Key, modifiers: egui::Modifiers) {
         let input = egui::RawInput {
-            modifiers,
-            events: vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }],
+            events: vec![egui::Event::ModifiersChanged(modifiers), egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }],
             ..Default::default()
         };
         ctx.run_ui(input, |ui| position_keys(ui.ctx(), f)).textures_delta.clear();
@@ -626,5 +777,52 @@ mod position_key_tests {
         let mut f = fields();
         press(&ctx, &mut f, egui::Key::ArrowRight, egui::Modifiers::ALT);
         assert_eq!(num(&f, "hOffsetPct", 0.0), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod setup_tests {
+    use super::*;
+
+    #[test]
+    fn face_height_slider_uses_millimeters_and_round_trips_to_percent() {
+        let millimeters = face_height_mm(FACE_PCT, 45.0);
+        assert!((millimeters - 33.525).abs() < 1e-9);
+        assert!((face_pct(33.75, 45.0) - 75.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn modifying_template_settings_keeps_the_selected_photo_size() {
+        let template = serde_json::from_value::<Map<String, Value>>(json!({"name": "Visa"})).unwrap_or_default();
+        let mut f = Map::new();
+        apply_choice(&mut f, "35x45", &[]);
+        apply_choice(&mut f, "t:Visa", &[template]);
+        assert_eq!(size_choice(&f), "custom");
+        assert_eq!(template_choice(&f), "Visa");
+
+        mark_template_modified(&mut f);
+        assert_eq!(size_choice(&f), "custom");
+        assert!(template_choice(&f).is_empty());
+
+        apply_choice(&mut f, "35x45", &[]);
+        mark_template_modified(&mut f);
+        assert_eq!(size_choice(&f), "35x45");
+    }
+
+    #[test]
+    fn preset_cards_include_saved_template_names_and_dimensions() {
+        let template = serde_json::from_value::<Map<String, Value>>(json!({
+            "name": "Family",
+            "widthMm": 40.0,
+            "heightMm": 50.0,
+            "dpi": 300.0,
+            "facePct": 74.5,
+            "eyeFromBottomPct": 56.0
+        }))
+        .unwrap_or_default();
+        let cards = preset_cards(&[template]);
+        assert_eq!(cards.len(), PRESETS.len() + 1);
+        assert_eq!(cards.first(), Some(&("t:Family".into(), "Family".into(), "40 × 50 mm".into())));
+        assert!(cards.iter().any(|card| card == &("35x45".into(), "Schengen / ICAO".into(), "35 × 45 mm".into())));
     }
 }

@@ -293,6 +293,31 @@ pub fn elided_label(ui: &mut Ui, text: &str, max_w: f32) -> Response {
     elided_label_sensed(ui, text, max_w, Sense::hover())
 }
 
+/// A selectable preset card with a title and a secondary detail line.
+pub fn preset_card(ui: &mut Ui, title: &str, detail: &str, selected: bool) -> Response {
+    let t = Tokens::get(ui.ctx());
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 54.0), Sense::click());
+    let fill = if response.is_pointer_button_down_on() {
+        t.pressed
+    } else if selected || response.hovered() {
+        t.hover
+    } else {
+        t.card
+    };
+    ui.painter().rect_filled(rect, t.radius_sm, fill);
+    ui.painter().rect_stroke(rect, t.radius_sm, Stroke::new(1.0, if selected { t.accent } else { t.field_border }), StrokeKind::Inside);
+
+    let title_galley = crate::tab_strip::elided(ui, title, egui::FontId::proportional(12.0), t.text, (rect.width() - 12.0).max(1.0));
+    let title_at = pos2(rect.center().x - title_galley.size().x / 2.0, rect.top() + 7.0);
+    ui.painter().galley(title_at, title_galley, t.text);
+    let detail_galley = crate::tab_strip::elided(ui, detail, egui::FontId::proportional(10.0), t.text_dim, (rect.width() - 12.0).max(1.0));
+    let detail_at = pos2(rect.center().x - detail_galley.size().x / 2.0, rect.top() + 31.0);
+    ui.painter().galley(detail_at, detail_galley, t.text_dim);
+
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), format!("{title}, {detail}")));
+    response.on_hover_text(format!("{title} · {detail}"))
+}
+
 /// Height of a [`value_field`]'s box.
 pub const VALUE_FIELD_H: f32 = 24.0;
 

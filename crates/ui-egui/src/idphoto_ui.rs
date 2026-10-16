@@ -187,11 +187,24 @@ pub fn params(f: &Map<String, Value>) -> Value {
     let mut p: Map<String, Value> = KEYS.iter().filter(|k| **k != "facePct").filter_map(|k| f.get(*k).map(|v| (k.to_string(), v.clone()))).collect();
     p.insert("faceHeightMm".into(), json!(num(f, "facePct", FACE_PCT) / 100.0 * num(f, "heightMm", 45.0)));
     p.insert("hOffsetPct".into(), json!(num(f, "hOffsetPct", 0.0)));
-    p.insert("eyeInFace".into(), json!(num(f, "eyeInFace", 0.5).clamp(0.0, 1.0)));
+    p.insert("eyeInFace".into(), json!(constrained_eye_in_face(f)));
     if let Some(face) = f.get("face") {
         p.insert("face".into(), face.clone());
     }
     Value::Object(p)
+}
+
+/// Keep the head-top and chin guides inside the output photo by constraining the eye's position
+/// within the face rectangle. The engine expresses the eye position from the photo's bottom edge.
+fn constrained_eye_in_face(f: &Map<String, Value>) -> f64 {
+    let photo_height_mm = num(f, "heightMm", 45.0).clamp(10.0, 200.0);
+    let dpi = num(f, "dpi", 300.0).clamp(72.0, 1200.0);
+    let output_height_mm = (photo_height_mm * dpi / 25.4).round() / dpi * 25.4;
+    let face_height_mm = photo_height_mm * num(f, "facePct", FACE_PCT).clamp(f64::from(FACE_RANGE.0), f64::from(FACE_RANGE.1)) / 100.0;
+    let eye_y_mm = output_height_mm * (1.0 - num(f, "eyeFromBottomPct", 56.0).clamp(f64::from(EYE_RANGE.0), f64::from(EYE_RANGE.1)) / 100.0);
+    let min_eye_in_face = ((eye_y_mm + face_height_mm - output_height_mm) / face_height_mm).clamp(0.0, 1.0);
+    let max_eye_in_face = (eye_y_mm / face_height_mm).clamp(0.0, 1.0);
+    num(f, "eyeInFace", 0.5).clamp(min_eye_in_face, max_eye_in_face)
 }
 
 pub fn confirm(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Result<Value, String> {
@@ -262,7 +275,7 @@ fn face_of(f: &Map<String, Value>) -> Option<[f64; 4]> {
 /// then re-fits the whole photo to it.
 fn drop_line(f: &mut Map<String, Value>, line: u8, at: f64, canvas: (f64, f64)) {
     let Some([x0, y0, x1, y1]) = face_of(f) else { return };
-    let eye_src = y0 + num(f, "eyeInFace", 0.5) * (y1 - y0);
+    let eye_src = y0 + constrained_eye_in_face(f) * (y1 - y0);
     let min_h = 20.0;
     let (mut nx0, mut ny0, mut nx1, mut ny1) = (x0, y0, x1, y1);
     match line {
@@ -316,7 +329,12 @@ fn preview_pane(app: &PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
             let at = |mm: f64| image.top() + (mm / height_mm) as f32 * size.y;
             let drag_id = egui::Id::new("idphoto-drag");
             let dragging: Option<(u8, f32)> = ui.ctx().data(|d| d.get_temp(drag_id));
-            let mut pos = [at(lay.head_top_mm), at(lay.eye_line_mm), at(lay.chin_mm), image.center().x];
+            let mut pos = [
+                at(lay.head_top_mm).clamp(image.top(), image.bottom()),
+                at(lay.eye_line_mm).clamp(image.top(), image.bottom()),
+                at(lay.chin_mm).clamp(image.top(), image.bottom()),
+                image.center().x,
+            ];
             if let Some((i, v)) = dragging
                 && let Some(slot) = pos.get_mut(usize::from(i))
             {
@@ -522,6 +540,47 @@ fn face_height_slider(ui: &mut egui::Ui, f: &mut Map<String, Value>, height_mm: 
     }
 }
 
+const LINKS: &str = "image.idPhoto.printLinks";
+
+/// The photo size as a key for the size → print layout link, e.g. "35x45".
+fn size_key(f: &Map<String, Value>) -> String {
+    format!("{}x{}", num(f, "widthMm", 35.0), num(f, "heightMm", 45.0))
+}
+
+/// The print layout linked to the current photo size ("selphy" until the user picks another, "none" = no sheet).
+pub fn linked_layout(app: &PhotocraftApp, f: &Map<String, Value>) -> String {
+    app.session.prefs().dialogs.get(LINKS).and_then(|m| m.get(size_key(f))).and_then(Value::as_str).unwrap_or("selphy").to_string()
+}
+
+/// The "Print layout" dropdown, remembered per photo size.
+fn print_layout_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
+    let choices = crate::selphy_ui::layout_choices(app);
+    let current = linked_layout(app, f);
+    let shown = choices.iter().find(|(id, _)| *id == current).map_or("None", |(_, n)| n.as_str()).to_string();
+    let mut picked = None;
+    ui.horizontal(|ui| {
+        ui.label("Sheet template");
+        egui::ComboBox::from_id_salt("idphoto-print-layout").selected_text(shown).width(ui.available_width() - 8.0).show_ui(ui, |ui| {
+            if ui.selectable_label(current == "none", "None").clicked() {
+                picked = Some("none".to_string());
+            }
+            for (id, name) in &choices {
+                if ui.selectable_label(*id == current, name).clicked() {
+                    picked = Some(id.clone());
+                }
+            }
+        });
+    });
+    if let Some(id) = picked {
+        let key = size_key(f);
+        app.session.prefs.edit(|prefs| {
+            let mut links = prefs.dialogs.get(LINKS).and_then(Value::as_object).cloned().unwrap_or_default();
+            links.insert(key, json!(id));
+            prefs.dialogs.insert(LINKS.into(), Value::Object(links));
+        });
+    }
+}
+
 fn settings_pane(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     let t = Tokens::get(ui.ctx());
     let mut saved = templates(app);
@@ -542,7 +601,7 @@ fn settings_pane(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String,
         ui.columns(2, |columns| {
             for (index, (id, name, dimensions)) in cards.iter().take(visible_count).enumerate() {
                 let column = index % 2;
-                let response = widgets::preset_card(&mut columns[column], name, dimensions, choice == *id);
+                let response = widgets::compact_preset_card(&mut columns[column], name, dimensions, choice == *id);
                 if response.clicked() {
                     choice.clone_from(id);
                     apply_choice(f, id, &saved);
@@ -557,6 +616,19 @@ fn settings_pane(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String,
                 f.insert("__showMore".into(), json!(!expanded));
             }
         }
+        ui.add_space(8.0);
+        widgets::section_label(ui, "Face Alignment");
+        widgets::hairline(ui);
+        let height = num(f, "heightMm", 45.0).clamp(10.0, 200.0);
+        face_height_slider(ui, f, height);
+        ui.colored_label(t.text_dim, format!("{:.1}% of photo height", num(f, "facePct", FACE_PCT)));
+        slider(ui, f, "eyeFromBottomPct", "Eye Position From Bottom", EYE_RANGE, "%", 56.0);
+        slider(ui, f, "hOffsetPct", "H Position", H_RANGE, "%", 0.0);
+        ui.colored_label(t.text_dim, "Arrow keys nudge 1 px · Shift + arrows: 10 px");
+
+        ui.add_space(8.0);
+        widgets::section_label(ui, "Custom Dimensions & Resolution");
+        widgets::hairline(ui);
         if ui.selectable_label(choice == "custom", "Custom dimensions…").clicked() {
             choice = "custom".into();
             apply_choice(f, &choice, &saved);
@@ -584,14 +656,9 @@ fn settings_pane(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String,
         });
 
         ui.add_space(8.0);
-        widgets::section_label(ui, "Face Alignment");
+        widgets::section_label(ui, "Print Layout");
         widgets::hairline(ui);
-        let height = num(f, "heightMm", 45.0).clamp(10.0, 200.0);
-        face_height_slider(ui, f, height);
-        ui.colored_label(t.text_dim, format!("{:.1}% of photo height", num(f, "facePct", FACE_PCT)));
-        slider(ui, f, "eyeFromBottomPct", "Eye Position From Bottom", EYE_RANGE, "%", 56.0);
-        slider(ui, f, "hOffsetPct", "H Position", H_RANGE, "%", 0.0);
-        ui.colored_label(t.text_dim, "Arrow keys nudge 1 px · Shift + arrows: 10 px");
+        print_layout_row(app, ui, f);
 
         ui.add_space(8.0);
         widgets::section_label(ui, "Save Template");
@@ -680,6 +747,13 @@ pub fn shell(
             ui.painter().line_segment([bar.left_top(), bar.right_top()], Stroke::new(1.0, t.separator));
             let mut footer = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(16.0, 10.0))).layout(egui::Layout::right_to_left(egui::Align::Min)));
             footer.spacing_mut().item_spacing.x = 10.0;
+            let print_layout_enabled = linked_layout(app, f) != "none";
+            let print_clicked =
+                footer.add_enabled_ui(print_layout_enabled, |ui| widgets::secondary_button(ui, "Make photo and print layout…", 190.0)).inner.clicked();
+            if print_clicked {
+                f.insert("__thenPrint".into(), json!(true));
+                outcome = Some(true);
+            }
             let buttons = [
                 widgets::DialogButton::new(widgets::ButtonRole::Default, tl!("OK"), 84.0),
                 widgets::DialogButton::new(widgets::ButtonRole::Cancel, tl!("Cancel"), 84.0),
@@ -789,6 +863,33 @@ mod setup_tests {
         let millimeters = face_height_mm(FACE_PCT, 45.0);
         assert!((millimeters - 33.525).abs() < 1e-9);
         assert!((face_pct(33.75, 45.0) - 75.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn head_top_and_chin_guides_stay_inside_the_photo() {
+        for (face_pct, eye_from_bottom_pct, eye_in_face) in [(90.0, 40.0, 0.0), (90.0, 70.0, 1.0), (50.0, 70.0, 0.0), (90.0, 56.0, 1.0)] {
+            let f: Map<String, Value> = serde_json::from_value(json!({
+                "widthMm": 35.0,
+                "heightMm": 45.0,
+                "dpi": 300.0,
+                "facePct": face_pct,
+                "eyeFromBottomPct": eye_from_bottom_pct,
+                "eyeInFace": eye_in_face,
+                "face": {"x": 100, "y": 100, "width": 80, "height": 100}
+            }))
+            .unwrap_or_default();
+            let settings = engine::settings(&params(&f)).unwrap();
+            let layout = photocraft_engine::idphoto_layout::layout(
+                photocraft_engine::idphoto_layout::FaceRect { x0: 100.0, y0: 100.0, x1: 180.0, y1: 200.0 },
+                &settings,
+            )
+            .unwrap();
+
+            assert!(layout.head_top_mm >= -0.01, "head top {} mm", layout.head_top_mm);
+            assert!(layout.chin_mm <= 45.01, "chin {} mm", layout.chin_mm);
+            assert!(layout.head_top_mm <= layout.eye_line_mm);
+            assert!(layout.eye_line_mm <= layout.chin_mm);
+        }
     }
 
     #[test]

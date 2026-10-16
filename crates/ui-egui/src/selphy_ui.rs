@@ -173,12 +173,28 @@ fn fields(app: &PhotocraftApp) -> Map<String, Value> {
 }
 
 pub fn open(app: &mut PhotocraftApp) -> u64 {
+    open_with(app, "")
+}
+
+/// The print layouts a photo size can be linked to: (id, name), built-ins then saved templates.
+pub fn layout_choices(app: &PhotocraftApp) -> Vec<(String, String)> {
+    let mut v: Vec<_> = PRESETS.iter().map(|(id, name, _)| ((*id).to_string(), (*name).to_string())).collect();
+    v.extend(templates(app).iter().filter_map(|t| t.get("name").and_then(Value::as_str).map(|n| (format!("t:{n}"), n.to_string()))));
+    v
+}
+
+/// Opens the dialog with a built-in preset or saved template (`""` = what was used last time).
+pub fn open_with(app: &mut PhotocraftApp, choice: &str) -> u64 {
     if app.session.active().is_none() {
         let mut f = Map::new();
         f.insert("message".into(), json!("Open the photo to print first."));
         return app.ui.open_dialog(crate::state::DialogKind::Error, f);
     }
-    let f = fields(app);
+    let mut f = fields(app);
+    if !choice.is_empty() {
+        let list = templates(app);
+        apply_choice(&mut f, choice, &list);
+    }
     app.ui.open_dialog(crate::state::DialogKind::Command, f)
 }
 

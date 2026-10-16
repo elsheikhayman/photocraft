@@ -295,8 +295,17 @@ pub fn elided_label(ui: &mut Ui, text: &str, max_w: f32) -> Response {
 
 /// A selectable preset card with a title and a secondary detail line.
 pub fn preset_card(ui: &mut Ui, title: &str, detail: &str, selected: bool) -> Response {
+    preset_card_with_height(ui, title, detail, selected, 54.0)
+}
+
+/// A shorter selectable preset card for dense preset grids.
+pub fn compact_preset_card(ui: &mut Ui, title: &str, detail: &str, selected: bool) -> Response {
+    preset_card_with_height(ui, title, detail, selected, 48.0)
+}
+
+fn preset_card_with_height(ui: &mut Ui, title: &str, detail: &str, selected: bool, height: f32) -> Response {
     let t = Tokens::get(ui.ctx());
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 54.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
     let fill = if response.is_pointer_button_down_on() {
         t.pressed
     } else if selected || response.hovered() {
@@ -308,10 +317,12 @@ pub fn preset_card(ui: &mut Ui, title: &str, detail: &str, selected: bool) -> Re
     ui.painter().rect_stroke(rect, t.radius_sm, Stroke::new(1.0, if selected { t.accent } else { t.field_border }), StrokeKind::Inside);
 
     let title_galley = crate::tab_strip::elided(ui, title, egui::FontId::proportional(12.0), t.text, (rect.width() - 12.0).max(1.0));
-    let title_at = pos2(rect.center().x - title_galley.size().x / 2.0, rect.top() + 7.0);
+    let title_offset = if height < 54.0 { 5.0 } else { 7.0 };
+    let detail_offset = if height < 54.0 { 27.0 } else { 31.0 };
+    let title_at = pos2(rect.center().x - title_galley.size().x / 2.0, rect.top() + title_offset);
     ui.painter().galley(title_at, title_galley, t.text);
     let detail_galley = crate::tab_strip::elided(ui, detail, egui::FontId::proportional(10.0), t.text_dim, (rect.width() - 12.0).max(1.0));
-    let detail_at = pos2(rect.center().x - detail_galley.size().x / 2.0, rect.top() + 31.0);
+    let detail_at = pos2(rect.center().x - detail_galley.size().x / 2.0, rect.top() + detail_offset);
     ui.painter().galley(detail_at, detail_galley, t.text_dim);
 
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), format!("{title}, {detail}")));

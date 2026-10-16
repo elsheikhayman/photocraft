@@ -179,12 +179,18 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
             let mut fields = d.fields.clone();
             let outcome = if crate::selphy_ui::owns(&fields) { crate::selphy_ui::window(app, ctx, d.id, &title, &mut fields) } else { crate::idphoto_ui::window(app, ctx, d.id, &title, &mut fields) };
             if let Some(dm) = app.ui.dialog_mut(d.id) {
-                dm.fields = fields;
+                dm.fields = fields.clone();
             }
             match outcome {
                 Some(true) => {
-                    if let Err(error) = confirm(app, d.id) {
-                        app.ui.status = error;
+                    let then_print = fields.get("__thenPrint").and_then(serde_json::Value::as_bool).unwrap_or(false);
+                    let layout = crate::idphoto_ui::linked_layout(app, &fields);
+                    match confirm(app, d.id) {
+                        Err(error) => app.ui.status = error,
+                        Ok(_) if then_print && layout != "none" => {
+                            crate::selphy_ui::open_with(app, &layout);
+                        }
+                        Ok(_) => {}
                     }
                 }
                 Some(false) => {
